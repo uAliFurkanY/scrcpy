@@ -1,24 +1,37 @@
-# scrcpy (v1.19)
+# scrcpy (v1.20)
+
+<img src="data/icon.svg" width="128" height="128" alt="scrcpy" align="right" />
 
 [Read in another language](#translations)
 
-This application provides display and control of Android devices connected on
-USB (or [over TCP/IP][article-tcpip]). It does not require any _root_ access.
+This application provides display and control of Android devices connected via
+USB (or [over TCP/IP](#wireless)). It does not require any _root_ access.
 It works on _GNU/Linux_, _Windows_ and _macOS_.
 
 ![screenshot](assets/screenshot-debian-600.jpg)
 
 It focuses on:
 
- - **lightness** (native, displays only the device screen)
- - **performance** (30~60fps)
- - **quality** (1920×1080 or above)
- - **low latency** ([35~70ms][lowlatency])
- - **low startup time** (~1 second to display the first image)
- - **non-intrusiveness** (nothing is left installed on the device)
+ - **lightness**: native, displays only the device screen
+ - **performance**: 30~120fps, depending on the device
+ - **quality**: 1920×1080 or above
+ - **low latency**: [35~70ms][lowlatency]
+ - **low startup time**: ~1 second to display the first image
+ - **non-intrusiveness**: nothing is left installed on the device
+ - **user benefits**: no account, no ads, no internet required
+ - **freedom**: free and open source software
 
 [lowlatency]: https://github.com/Genymobile/scrcpy/pull/646
 
+Its features include:
+ - [recording](#recording)
+ - mirroring with [device screen off](#turn-screen-off)
+ - [copy-paste](#copy-paste) in both directions
+ - [configurable quality](#capture-configuration)
+ - device screen [as a webcam (V4L2)](#v4l2loopback) (Linux-only)
+ - [physical keyboard simulation (HID)](#physical-keyboard-simulation-hid)
+   (Linux-only)
+ - and more…
 
 ## Requirements
 
@@ -88,10 +101,10 @@ process][BUILD_simple]).
 For Windows, for simplicity, a prebuilt archive with all the dependencies
 (including `adb`) is available:
 
- - [`scrcpy-win64-v1.19.zip`][direct-win64]  
-   _(SHA-256: 383d6483f25ac0092d4bb9fef6c967351ecd50fc248e0c82932db97d6d32f11b)_
+ - [`scrcpy-win64-v1.20.zip`][direct-win64]  
+   _(SHA-256: 548532b616288bcaeceff6881ad5e6f0928e5ae2b48c380385f03627401cfdba)_
 
-[direct-win64]: https://github.com/Genymobile/scrcpy/releases/download/v1.19/scrcpy-win64-v1.19.zip
+[direct-win64]: https://github.com/Genymobile/scrcpy/releases/download/v1.20/scrcpy-win64-v1.20.zip
 
 It is also available in [Chocolatey]:
 
@@ -582,6 +595,14 @@ scrcpy --turn-screen-off --stay-awake
 scrcpy -Sw
 ```
 
+#### Power off on close
+
+To turn the device screen off when closing scrcpy:
+
+```bash
+scrcpy --power-off-on-close
+```
+
 
 #### Show touches
 
@@ -673,6 +694,39 @@ content (if supported by the app) relative to the center of the screen.
 Concretely, scrcpy generates additional touch events from a "virtual finger" at
 a location inverted through the center of the screen.
 
+#### Physical keyboard simulation (HID)
+
+By default, scrcpy uses Android key or text injection: it works everywhere, but
+is limited to ASCII.
+
+On Linux, scrcpy can simulate a physical USB keyboard on Android to provide a
+better input experience (using [USB HID over AOAv2][hid-aoav2]): the virtual
+keyboard is disabled and it works for all characters and IME.
+
+[hid-aoav2]: https://source.android.com/devices/accessories/aoa2#hid-support
+
+However, it only works if the device is connected by USB, and is currently only
+supported on Linux.
+
+To enable this mode:
+
+```bash
+scrcpy --hid-keyboard
+scrcpy -K  # short version
+```
+
+If it fails for some reason (for example because the device is not connected via
+USB), it automatically fallbacks to the default mode (with a log in the
+console). This allows to use the same command line options when connected over
+USB and TCP/IP.
+
+In this mode, raw key events (scancodes) are sent to the device, independently
+of the host key mapping. Therefore, if your keyboard layout does not match, it
+must be configured on the Android device, in Settings → System → Languages and
+input → [Physical keyboard].
+
+[Physical keyboard]: https://github.com/Genymobile/scrcpy/pull/2632#issuecomment-923756915
+
 
 #### Text injection preference
 
@@ -692,6 +746,9 @@ scrcpy --prefer-text
 
 (but this will break keyboard behavior in games)
 
+This option has no effect on HID keyboard (all key events are sent as
+scancodes in this mode).
+
 [textevents]: https://blog.rom1v.com/2018/03/introducing-scrcpy/#handle-text-input
 [prefertext]: https://github.com/Genymobile/scrcpy/issues/650#issuecomment-512945343
 
@@ -706,6 +763,9 @@ To avoid forwarding repeated key events:
 ```bash
 scrcpy --no-key-repeat
 ```
+
+This option has no effect on HID keyboard (key repeat is handled by Android
+directly in this mode).
 
 
 #### Right-click and middle-click
@@ -791,7 +851,7 @@ _<kbd>[Super]</kbd> is typically the <kbd>Windows</kbd> or <kbd>Cmd</kbd> key._
  | Turn device screen on                       | <kbd>MOD</kbd>+<kbd>Shift</kbd>+<kbd>o</kbd>
  | Rotate device screen                        | <kbd>MOD</kbd>+<kbd>r</kbd>
  | Expand notification panel                   | <kbd>MOD</kbd>+<kbd>n</kbd> \| _5th-click³_
- | Expand settings panel                       |  <kbd>MOD</kbd>+<kbd>n</kbd>+<kbd>n</kbd> \| _Double-5th-click³_
+ | Expand settings panel                       | <kbd>MOD</kbd>+<kbd>n</kbd>+<kbd>n</kbd> \| _Double-5th-click³_
  | Collapse panels                             | <kbd>MOD</kbd>+<kbd>Shift</kbd>+<kbd>n</kbd>
  | Copy to clipboard⁴                          | <kbd>MOD</kbd>+<kbd>c</kbd>
  | Cut to clipboard⁴                           | <kbd>MOD</kbd>+<kbd>x</kbd>
@@ -799,6 +859,8 @@ _<kbd>[Super]</kbd> is typically the <kbd>Windows</kbd> or <kbd>Cmd</kbd> key._
  | Inject computer clipboard text              | <kbd>MOD</kbd>+<kbd>Shift</kbd>+<kbd>v</kbd>
  | Enable/disable FPS counter (on stdout)      | <kbd>MOD</kbd>+<kbd>i</kbd>
  | Pinch-to-zoom                               | <kbd>Ctrl</kbd>+_click-and-move_
+ | Drag & drop APK file                        | Install APK from computer
+ | Drag & drop non-APK file                    | [Push file to device](#push-file-to-device)
 
 _¹Double-click on black borders to remove them._  
 _²Right-click turns the screen on if it was off, presses BACK otherwise._  
@@ -828,7 +890,7 @@ ADB=/path/to/adb scrcpy
 To override the path of the `scrcpy-server` file, configure its path in
 `SCRCPY_SERVER_PATH`.
 
-[useful]: https://github.com/Genymobile/scrcpy/issues/278#issuecomment-429330345
+To override the icon, configure its path in `SCRCPY_ICON_PATH`.
 
 
 ## Why _scrcpy_?
@@ -893,7 +955,7 @@ This README is available in other languages:
 - [한국어 (Korean, `ko`) - v1.11](README.ko.md)
 - [Português Brasileiro (Brazilian Portuguese, `pt-BR`) - v1.19](README.pt-br.md)
 - [Español (Spanish, `sp`) - v1.17](README.sp.md)
-- [简体中文 (Simplified Chinese, `zh-Hans`) - v1.17](README.zh-Hans.md)
+- [简体中文 (Simplified Chinese, `zh-Hans`) - v1.20](README.zh-Hans.md)
 - [繁體中文 (Traditional Chinese, `zh-Hant`) - v1.15](README.zh-Hant.md)
 - [Turkish (Turkish, `tr`) - v1.18](README.tr.md)
 
