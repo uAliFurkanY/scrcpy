@@ -632,11 +632,11 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
         if (controller) {
             enum sc_action action = down ? SC_ACTION_DOWN : SC_ACTION_UP;
 
-            if (control && event->button == 7) {
+            if (event->button == 7) {
                 action_app_switch(controller, action);
                 return;
             }
-            if (control && event->button == SDL_BUTTON_X2 && down) {
+            if (event->button == SDL_BUTTON_X2 && down) {
                 if (event->clicks < 2) {
                     expand_notification_panel(controller);
                 } else {
@@ -644,11 +644,11 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
                 }
                 return;
             }
-            if (control && (event->button == SDL_BUTTON_RIGHT || event->button == SDL_BUTTON_X1)) {
+            if (event->button == SDL_BUTTON_RIGHT || event->button == SDL_BUTTON_X1) {
                 press_back_or_turn_screen_on(controller, action);
                 return;
             }
-            if (control && event->button == SDL_BUTTON_MIDDLE) {
+            if (event->button == SDL_BUTTON_MIDDLE) {
                 action_home(controller, action);
                 return;
             }
