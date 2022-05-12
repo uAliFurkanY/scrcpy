@@ -1,5 +1,7 @@
 #include "util/process.h"
 
+#include <processthreadsapi.h>
+
 #include <assert.h>
 
 #include "util/log.h"
@@ -22,8 +24,14 @@ build_cmd(char *cmd, size_t len, const char *const argv[]) {
 }
 
 enum sc_process_result
-sc_process_execute_p(const char *const argv[], HANDLE *handle,
+sc_process_execute_p(const char *const argv[], HANDLE *handle, unsigned flags,
                      HANDLE *pin, HANDLE *pout, HANDLE *perr) {
+    bool inherit_stdout = !pout && !(flags & SC_PROCESS_NO_STDOUT);
+    bool inherit_stderr = !perr && !(flags & SC_PROCESS_NO_STDERR);
+
+    // Add 1 per non-NULL pointer
+    unsigned handle_count = !!pin || !!pout || !!perr;
+
     enum sc_process_result ret = SC_PROCESS_ERROR_GENERIC;
 
     SECURITY_ATTRIBUTES sa;
@@ -65,45 +73,107 @@ sc_process_execute_p(const char *const argv[], HANDLE *handle,
         }
     }
 
-    STARTUPINFOW si;
+    STARTUPINFOEXW si;
     PROCESS_INFORMATION pi;
     memset(&si, 0, sizeof(si));
-    si.cb = sizeof(si);
-    if (pin || pout || perr) {
-        si.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.cb = sizeof(si);
+    HANDLE handles[3];
+
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    if (inherit_stdout) {
+        si.StartupInfo.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    }
+    if (inherit_stderr) {
+        si.StartupInfo.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    }
+
+    LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList = NULL;
+    if (handle_count) {
+        unsigned i = 0;
         if (pin) {
-            si.hStdInput = stdin_read_handle;
+            si.StartupInfo.hStdInput = stdin_read_handle;
+            handles[i++] = si.StartupInfo.hStdInput;
         }
         if (pout) {
-            si.hStdOutput = stdout_write_handle;
+            assert(!inherit_stdout);
+            si.StartupInfo.hStdOutput = stdout_write_handle;
+            handles[i++] = si.StartupInfo.hStdOutput;
         }
         if (perr) {
-            si.hStdError = stderr_write_handle;
+            assert(!inherit_stderr);
+            si.StartupInfo.hStdError = stderr_write_handle;
+            handles[i++] = si.StartupInfo.hStdError;
         }
+
+        SIZE_T size;
+        // Call it once to know the required buffer size
+        BOOL ok =
+            InitializeProcThreadAttributeList(NULL, 1, 0, &size)
+                || GetLastError() == ERROR_INSUFFICIENT_BUFFER;
+        if (!ok) {
+            goto error_close_stderr;
+        }
+
+        lpAttributeList = malloc(size);
+        if (!lpAttributeList) {
+            LOG_OOM();
+            goto error_close_stderr;
+        }
+
+        ok = InitializeProcThreadAttributeList(lpAttributeList, 1, 0, &size);
+        if (!ok) {
+            free(lpAttributeList);
+            goto error_close_stderr;
+        }
+
+        ok = UpdateProcThreadAttribute(lpAttributeList, 0,
+                                       PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                       handles, handle_count * sizeof(HANDLE),
+                                       NULL, NULL);
+        if (!ok) {
+            goto error_free_attribute_list;
+        }
+
+        si.lpAttributeList = lpAttributeList;
     }
 
     char *cmd = malloc(CMD_MAX_LEN);
     if (!cmd || !build_cmd(cmd, CMD_MAX_LEN, argv)) {
-        *handle = NULL;
-        goto error_close_stderr;
+        LOG_OOM();
+        goto error_free_attribute_list;
     }
 
     wchar_t *wide = sc_str_to_wchars(cmd);
     free(cmd);
     if (!wide) {
-        LOGC("Could not allocate wide char string");
-        goto error_close_stderr;
+        LOG_OOM();
+        goto error_free_attribute_list;
     }
 
-    if (!CreateProcessW(NULL, wide, NULL, NULL, TRUE, 0, NULL, NULL, &si,
-                        &pi)) {
-        free(wide);
-        *handle = NULL;
-
-        if (GetLastError() == ERROR_FILE_NOT_FOUND) {
+    BOOL bInheritHandles = handle_count > 0 || inherit_stdout || inherit_stderr;
+    DWORD dwCreationFlags = 0;
+    if (handle_count > 0) {
+        dwCreationFlags |= EXTENDED_STARTUPINFO_PRESENT;
+    }
+    if (!inherit_stdout && !inherit_stderr) {
+        // DETACHED_PROCESS to disable stdin, stdout and stderr
+        dwCreationFlags |= DETACHED_PROCESS;
+    }
+    BOOL ok = CreateProcessW(NULL, wide, NULL, NULL, bInheritHandles,
+                             dwCreationFlags, NULL, NULL, &si.StartupInfo, &pi);
+    free(wide);
+    if (!ok) {
+        int err = GetLastError();
+        LOGE("CreateProcessW() error %d", err);
+        if (err == ERROR_FILE_NOT_FOUND) {
             ret = SC_PROCESS_ERROR_MISSING_BINARY;
         }
-        goto error_close_stderr;
+        goto error_free_attribute_list;
+    }
+
+    if (lpAttributeList) {
+        DeleteProcThreadAttributeList(lpAttributeList);
+        free(lpAttributeList);
     }
 
     // These handles are used by the child process, close them for this process
@@ -117,11 +187,15 @@ sc_process_execute_p(const char *const argv[], HANDLE *handle,
         CloseHandle(stderr_write_handle);
     }
 
-    free(wide);
     *handle = pi.hProcess;
 
     return SC_PROCESS_SUCCESS;
 
+error_free_attribute_list:
+    if (lpAttributeList) {
+        DeleteProcThreadAttributeList(lpAttributeList);
+        free(lpAttributeList);
+    }
 error_close_stderr:
     if (perr) {
         CloseHandle(*perr);
@@ -168,7 +242,7 @@ sc_process_close(HANDLE handle) {
 }
 
 ssize_t
-sc_read_pipe(HANDLE pipe, char *data, size_t len) {
+sc_pipe_read(HANDLE pipe, char *data, size_t len) {
     DWORD r;
     if (!ReadFile(pipe, data, len, &r, NULL)) {
         return -1;
@@ -177,7 +251,7 @@ sc_read_pipe(HANDLE pipe, char *data, size_t len) {
 }
 
 void
-sc_close_pipe(HANDLE pipe) {
+sc_pipe_close(HANDLE pipe) {
     if (!CloseHandle(pipe)) {
         LOGW("Cannot close pipe");
     }

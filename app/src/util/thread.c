@@ -8,8 +8,13 @@
 bool
 sc_thread_create(sc_thread *thread, sc_thread_fn fn, const char *name,
                  void *userdata) {
+    // The thread name length is limited on some systems. Never use a name
+    // longer than 16 bytes (including the final '\0')
+    assert(strlen(name) <= 15);
+
     SDL_Thread *sdl_thread = SDL_CreateThread(fn, name, userdata);
     if (!sdl_thread) {
+        LOG_OOM();
         return false;
     }
 
@@ -26,6 +31,7 @@ bool
 sc_mutex_init(sc_mutex *mutex) {
     SDL_mutex *sdl_mutex = SDL_CreateMutex();
     if (!sdl_mutex) {
+        LOG_OOM();
         return false;
     }
 
@@ -48,7 +54,7 @@ sc_mutex_lock(sc_mutex *mutex) {
     int r = SDL_LockMutex(mutex->mutex);
 #ifndef NDEBUG
     if (r) {
-        LOGC("Could not lock mutex: %s", SDL_GetError());
+        LOGE("Could not lock mutex: %s", SDL_GetError());
         abort();
     }
 
@@ -68,7 +74,7 @@ sc_mutex_unlock(sc_mutex *mutex) {
     int r = SDL_UnlockMutex(mutex->mutex);
 #ifndef NDEBUG
     if (r) {
-        LOGC("Could not lock mutex: %s", SDL_GetError());
+        LOGE("Could not lock mutex: %s", SDL_GetError());
         abort();
     }
 #else
@@ -94,6 +100,7 @@ bool
 sc_cond_init(sc_cond *cond) {
     SDL_cond *sdl_cond = SDL_CreateCond();
     if (!sdl_cond) {
+        LOG_OOM();
         return false;
     }
 
@@ -111,7 +118,7 @@ sc_cond_wait(sc_cond *cond, sc_mutex *mutex) {
     int r = SDL_CondWait(cond->cond, mutex->mutex);
 #ifndef NDEBUG
     if (r) {
-        LOGC("Could not wait on condition: %s", SDL_GetError());
+        LOGE("Could not wait on condition: %s", SDL_GetError());
         abort();
     }
 
@@ -129,11 +136,13 @@ sc_cond_timedwait(sc_cond *cond, sc_mutex *mutex, sc_tick deadline) {
         return false; // timeout
     }
 
-    uint32_t ms = SC_TICK_TO_MS(deadline - now);
+    // Round up to the next millisecond to guarantee that the deadline is
+    // reached when returning due to timeout
+    uint32_t ms = SC_TICK_TO_MS(deadline - now + SC_TICK_FROM_MS(1) - 1);
     int r = SDL_CondWaitTimeout(cond->cond, mutex->mutex, ms);
 #ifndef NDEBUG
     if (r < 0) {
-        LOGC("Could not wait on condition with timeout: %s", SDL_GetError());
+        LOGE("Could not wait on condition with timeout: %s", SDL_GetError());
         abort();
     }
 
@@ -141,6 +150,8 @@ sc_cond_timedwait(sc_cond *cond, sc_mutex *mutex, sc_tick deadline) {
                           memory_order_relaxed);
 #endif
     assert(r == 0 || r == SDL_MUTEX_TIMEDOUT);
+    // The deadline is reached on timeout
+    assert(r != SDL_MUTEX_TIMEDOUT || sc_tick_now() >= deadline);
     return r == 0;
 }
 
@@ -149,7 +160,7 @@ sc_cond_signal(sc_cond *cond) {
     int r = SDL_CondSignal(cond->cond);
 #ifndef NDEBUG
     if (r) {
-        LOGC("Could not signal a condition: %s", SDL_GetError());
+        LOGE("Could not signal a condition: %s", SDL_GetError());
         abort();
     }
 #else
@@ -162,7 +173,7 @@ sc_cond_broadcast(sc_cond *cond) {
     int r = SDL_CondBroadcast(cond->cond);
 #ifndef NDEBUG
     if (r) {
-        LOGC("Could not broadcast a condition: %s", SDL_GetError());
+        LOGE("Could not broadcast a condition: %s", SDL_GetError());
         abort();
     }
 #else

@@ -13,30 +13,9 @@
 #include "cli.h"
 #include "options.h"
 #include "scrcpy.h"
+#include "usb/scrcpy_otg.h"
 #include "util/log.h"
-
-static void
-print_version(void) {
-    fprintf(stderr, "scrcpy %s\n\n", SCRCPY_VERSION);
-
-    fprintf(stderr, "dependencies:\n");
-    fprintf(stderr, " - SDL %d.%d.%d\n", SDL_MAJOR_VERSION, SDL_MINOR_VERSION,
-                                         SDL_PATCHLEVEL);
-    fprintf(stderr, " - libavcodec %d.%d.%d\n", LIBAVCODEC_VERSION_MAJOR,
-                                                LIBAVCODEC_VERSION_MINOR,
-                                                LIBAVCODEC_VERSION_MICRO);
-    fprintf(stderr, " - libavformat %d.%d.%d\n", LIBAVFORMAT_VERSION_MAJOR,
-                                                 LIBAVFORMAT_VERSION_MINOR,
-                                                 LIBAVFORMAT_VERSION_MICRO);
-    fprintf(stderr, " - libavutil %d.%d.%d\n", LIBAVUTIL_VERSION_MAJOR,
-                                               LIBAVUTIL_VERSION_MINOR,
-                                               LIBAVUTIL_VERSION_MICRO);
-#ifdef HAVE_V4L2
-    fprintf(stderr, " - libavdevice %d.%d.%d\n", LIBAVDEVICE_VERSION_MAJOR,
-                                                 LIBAVDEVICE_VERSION_MINOR,
-                                                 LIBAVDEVICE_VERSION_MICRO);
-#endif
-}
+#include "version.h"
 
 int
 main(int argc, char *argv[]) {
@@ -46,6 +25,9 @@ main(int argc, char *argv[]) {
     setbuf(stdout, NULL);
     setbuf(stderr, NULL);
 #endif
+
+    printf("scrcpy " SCRCPY_VERSION
+           " <https://github.com/Genymobile/scrcpy>\n");
 
     struct scrcpy_cli_args args = {
         .opts = scrcpy_options_default,
@@ -69,11 +51,9 @@ main(int argc, char *argv[]) {
     }
 
     if (args.version) {
-        print_version();
+        scrcpy_print_version();
         return 0;
     }
-
-    LOGI("scrcpy " SCRCPY_VERSION " <https://github.com/Genymobile/scrcpy>");
 
 #ifdef SCRCPY_LAVF_REQUIRES_REGISTER_ALL
     av_register_all();
@@ -89,9 +69,14 @@ main(int argc, char *argv[]) {
         return 1;
     }
 
-    int res = scrcpy(&args.opts) ? 0 : 1;
+#ifdef HAVE_USB
+    bool ok = args.opts.otg ? scrcpy_otg(&args.opts)
+                            : scrcpy(&args.opts);
+#else
+    bool ok = scrcpy(&args.opts);
+#endif
 
     avformat_network_deinit(); // ignore failure
 
-    return res;
+    return ok ? 0 : 1;
 }

@@ -8,22 +8,23 @@
 #include <SDL2/SDL.h>
 
 #include "controller.h"
+#include "file_pusher.h"
 #include "fps_counter.h"
 #include "options.h"
-#include "screen.h"
 #include "trait/key_processor.h"
 #include "trait/mouse_processor.h"
 
-struct input_manager {
-    struct controller *controller;
-    struct screen *screen;
+struct sc_input_manager {
+    struct sc_controller *controller;
+    struct sc_file_pusher *fp;
+    struct sc_screen *screen;
 
     struct sc_key_processor *kp;
     struct sc_mouse_processor *mp;
 
-    bool control;
     bool forward_all_clicks;
     bool legacy_paste;
+    bool clipboard_autosync;
 
     struct {
         unsigned data[SC_MAX_SHORTCUT_MODS];
@@ -38,15 +39,28 @@ struct input_manager {
     unsigned key_repeat;
     SDL_Keycode last_keycode;
     uint16_t last_mod;
+
+    uint64_t next_sequence; // used for request acknowledgements
+};
+
+struct sc_input_manager_params {
+    struct sc_controller *controller;
+    struct sc_file_pusher *fp;
+    struct sc_screen *screen;
+    struct sc_key_processor *kp;
+    struct sc_mouse_processor *mp;
+
+    bool forward_all_clicks;
+    bool legacy_paste;
+    bool clipboard_autosync;
+    const struct sc_shortcut_mods *shortcut_mods;
 };
 
 void
-input_manager_init(struct input_manager *im, struct controller *controller,
-                   struct screen *screen, struct sc_key_processor *kp,
-                   struct sc_mouse_processor *mp,
-                   const struct scrcpy_options *options);
+sc_input_manager_init(struct sc_input_manager *im,
+                      const struct sc_input_manager_params *params);
 
-bool
-input_manager_handle_event(struct input_manager *im, SDL_Event *event);
+void
+sc_input_manager_handle_event(struct sc_input_manager *im, SDL_Event *event);
 
 #endif

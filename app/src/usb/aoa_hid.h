@@ -6,6 +6,8 @@
 
 #include <libusb-1.0/libusb.h>
 
+#include "usb.h"
+#include "util/acksync.h"
 #include "util/cbuf.h"
 #include "util/thread.h"
 #include "util/tick.h"
@@ -14,7 +16,7 @@ struct sc_hid_event {
     uint16_t accessory_id;
     unsigned char *buffer;
     uint16_t size;
-    sc_tick delay;
+    uint64_t ack_to_wait;
 };
 
 // Takes ownership of buffer
@@ -28,18 +30,18 @@ sc_hid_event_destroy(struct sc_hid_event *hid_event);
 struct sc_hid_event_queue CBUF(struct sc_hid_event, 64);
 
 struct sc_aoa {
-    libusb_context *usb_context;
-    libusb_device *usb_device;
-    libusb_device_handle *usb_handle;
+    struct sc_usb *usb;
     sc_thread thread;
     sc_mutex mutex;
     sc_cond event_cond;
     bool stopped;
     struct sc_hid_event_queue queue;
+
+    struct sc_acksync *acksync;
 };
 
 bool
-sc_aoa_init(struct sc_aoa *aoa, const char *serial);
+sc_aoa_init(struct sc_aoa *aoa, struct sc_usb *usb, struct sc_acksync *acksync);
 
 void
 sc_aoa_destroy(struct sc_aoa *aoa);

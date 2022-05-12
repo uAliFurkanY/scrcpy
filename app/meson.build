@@ -1,16 +1,19 @@
 src = [
     'src/main.c',
-    'src/adb.c',
-    'src/adb_tunnel.c',
+    'src/adb/adb.c',
+    'src/adb/adb_device.c',
+    'src/adb/adb_parser.c',
+    'src/adb/adb_tunnel.c',
     'src/cli.c',
     'src/clock.c',
     'src/compat.c',
     'src/control_msg.c',
     'src/controller.c',
     'src/decoder.c',
+    'src/demuxer.c',
     'src/device_msg.c',
     'src/icon.c',
-    'src/file_handler.c',
+    'src/file_pusher.c',
     'src/fps_counter.c',
     'src/frame_buffer.c',
     'src/input_manager.c',
@@ -23,9 +26,11 @@ src = [
     'src/scrcpy.c',
     'src/screen.c',
     'src/server.c',
-    'src/stream.c',
+    'src/version.c',
     'src/video_buffer.c',
+    'src/util/acksync.c',
     'src/util/file.c',
+    'src/util/intmap.c',
     'src/util/intr.c',
     'src/util/log.c',
     'src/util/net.c',
@@ -39,61 +44,76 @@ src = [
     'src/util/tick.c',
 ]
 
+conf = configuration_data()
+
+conf.set('_POSIX_C_SOURCE', '200809L')
+conf.set('_XOPEN_SOURCE', '700')
+conf.set('_GNU_SOURCE', true)
+
 if host_machine.system() == 'windows'
+    windows = import('windows')
     src += [
         'src/sys/win/file.c',
         'src/sys/win/process.c',
+        windows.compile_resources('scrcpy-windows.rc'),
     ]
+    conf.set('_WIN32_WINNT', '0x0600')
+    conf.set('WINVER', '0x0600')
 else
     src += [
         'src/sys/unix/file.c',
         'src/sys/unix/process.c',
     ]
+    if host_machine.system() == 'darwin'
+        conf.set('_DARWIN_C_SOURCE', true)
+    endif
 endif
 
-v4l2_support = host_machine.system() == 'linux'
+v4l2_support = get_option('v4l2') and host_machine.system() == 'linux'
 if v4l2_support
     src += [ 'src/v4l2_sink.c' ]
 endif
 
-aoa_hid_support = host_machine.system() == 'linux'
-if aoa_hid_support
+usb_support = get_option('usb')
+if usb_support
     src += [
-        'src/aoa_hid.c',
-        'src/hid_keyboard.c',
+        'src/usb/aoa_hid.c',
+        'src/usb/hid_keyboard.c',
+        'src/usb/hid_mouse.c',
+        'src/usb/scrcpy_otg.c',
+        'src/usb/screen_otg.c',
+        'src/usb/usb.c',
     ]
 endif
 
-check_functions = [
-    'strdup'
-]
-
 cc = meson.get_compiler('c')
 
-if not get_option('crossbuild_windows')
+crossbuild_windows = meson.is_cross_build() and host_machine.system() == 'windows'
+
+if not crossbuild_windows
 
     # native build
     dependencies = [
-        dependency('libavformat'),
-        dependency('libavcodec'),
+        dependency('libavformat', version: '>= 57.33'),
+        dependency('libavcodec', version: '>= 57.37'),
         dependency('libavutil'),
-        dependency('sdl2'),
+        dependency('sdl2', version: '>= 2.0.5'),
     ]
 
     if v4l2_support
         dependencies += dependency('libavdevice')
     endif
 
-    if aoa_hid_support
+    if usb_support
         dependencies += dependency('libusb-1.0')
     endif
 
 else
     # cross-compile mingw32 build (from Linux to Windows)
     prebuilt_sdl2 = meson.get_cross_property('prebuilt_sdl2')
-    sdl2_bin_dir = meson.current_source_dir() + '/../prebuilt-deps/' + prebuilt_sdl2 + '/bin'
-    sdl2_lib_dir = meson.current_source_dir() + '/../prebuilt-deps/' + prebuilt_sdl2 + '/lib'
-    sdl2_include_dir = '../prebuilt-deps/' + prebuilt_sdl2 + '/include'
+    sdl2_bin_dir = meson.current_source_dir() + '/prebuilt-deps/data/' + prebuilt_sdl2 + '/bin'
+    sdl2_lib_dir = meson.current_source_dir() + '/prebuilt-deps/data/' + prebuilt_sdl2 + '/lib'
+    sdl2_include_dir = 'prebuilt-deps/data/' + prebuilt_sdl2 + '/include'
 
     sdl2 = declare_dependency(
         dependencies: [
@@ -103,22 +123,40 @@ else
         include_directories: include_directories(sdl2_include_dir)
     )
 
-    prebuilt_ffmpeg_shared = meson.get_cross_property('prebuilt_ffmpeg_shared')
-    prebuilt_ffmpeg_dev = meson.get_cross_property('prebuilt_ffmpeg_dev')
-    ffmpeg_bin_dir = meson.current_source_dir() + '/../prebuilt-deps/' + prebuilt_ffmpeg_shared + '/bin'
-    ffmpeg_include_dir = '../prebuilt-deps/' + prebuilt_ffmpeg_dev + '/include'
+    prebuilt_ffmpeg = meson.get_cross_property('prebuilt_ffmpeg')
+    ffmpeg_bin_dir = meson.current_source_dir() + '/prebuilt-deps/data/' + prebuilt_ffmpeg + '/bin'
+    ffmpeg_include_dir = 'prebuilt-deps/data/' + prebuilt_ffmpeg + '/include'
+
+    # ffmpeg versions are different for win32 and win64 builds
+    ffmpeg_avcodec = meson.get_cross_property('ffmpeg_avcodec')
+    ffmpeg_avformat = meson.get_cross_property('ffmpeg_avformat')
+    ffmpeg_avutil = meson.get_cross_property('ffmpeg_avutil')
+
     ffmpeg = declare_dependency(
         dependencies: [
-            cc.find_library('avcodec-58', dirs: ffmpeg_bin_dir),
-            cc.find_library('avformat-58', dirs: ffmpeg_bin_dir),
-            cc.find_library('avutil-56', dirs: ffmpeg_bin_dir),
+            cc.find_library(ffmpeg_avcodec, dirs: ffmpeg_bin_dir),
+            cc.find_library(ffmpeg_avformat, dirs: ffmpeg_bin_dir),
+            cc.find_library(ffmpeg_avutil, dirs: ffmpeg_bin_dir),
         ],
         include_directories: include_directories(ffmpeg_include_dir)
+    )
+
+    prebuilt_libusb = meson.get_cross_property('prebuilt_libusb')
+    prebuilt_libusb_root = meson.get_cross_property('prebuilt_libusb_root')
+    libusb_bin_dir = meson.current_source_dir() + '/prebuilt-deps/data/' + prebuilt_libusb + '/dll'
+    libusb_include_dir = 'prebuilt-deps/data/' + prebuilt_libusb_root + '/include'
+
+    libusb = declare_dependency(
+        dependencies: [
+            cc.find_library('libusb-1.0', dirs: libusb_bin_dir),
+        ],
+        include_directories: include_directories(libusb_include_dir)
     )
 
     dependencies = [
         ffmpeg,
         sdl2,
+        libusb,
         cc.find_library('mingw32')
     ]
 
@@ -128,7 +166,11 @@ if host_machine.system() == 'windows'
     dependencies += cc.find_library('ws2_32')
 endif
 
-conf = configuration_data()
+check_functions = [
+    'strdup',
+    'asprintf',
+    'vasprintf',
+]
 
 foreach f : check_functions
   if cc.has_function(f)
@@ -136,6 +178,9 @@ foreach f : check_functions
     conf.set(define, true)
   endif
 endforeach
+
+conf.set('HAVE_SOCK_CLOEXEC', host_machine.system() != 'windows' and
+                              cc.has_header_symbol('sys/socket.h', 'SOCK_CLOEXEC'))
 
 # the version, updated on release
 conf.set_quoted('SCRCPY_VERSION', meson.project_version())
@@ -166,7 +211,7 @@ conf.set('SERVER_DEBUGGER_METHOD_NEW', get_option('server_debugger_method') == '
 conf.set('HAVE_V4L2', v4l2_support)
 
 # enable HID over AOA support (linux only)
-conf.set('HAVE_AOA_HID', aoa_hid_support)
+conf.set('HAVE_USB', usb_support)
 
 configure_file(configuration: conf, output: 'config.h')
 
@@ -179,9 +224,13 @@ executable('scrcpy', src,
            c_args: [])
 
 install_man('scrcpy.1')
-install_data('../data/icon.png',
+install_data('data/icon.png',
              rename: 'scrcpy.png',
              install_dir: 'share/icons/hicolor/256x256/apps')
+install_data('data/zsh-completion/_scrcpy',
+             install_dir: 'share/zsh/site-functions')
+install_data('data/bash-completion/scrcpy',
+             install_dir: 'share/bash-completion/completions')
 
 
 ### TESTS
@@ -189,8 +238,15 @@ install_data('../data/icon.png',
 # do not build tests in release (assertions would not be executed at all)
 if get_option('buildtype') == 'debug'
     tests = [
+        ['test_adb_parser', [
+            'tests/test_adb_parser.c',
+            'src/adb/adb_device.c',
+            'src/adb/adb_parser.c',
+            'src/util/str.c',
+            'src/util/strbuf.c',
+        ]],
         ['test_buffer_util', [
-            'tests/test_buffer_util.c'
+            'tests/test_buffer_util.c',
         ]],
         ['test_cbuf', [
             'tests/test_cbuf.c',
@@ -199,6 +255,7 @@ if get_option('buildtype') == 'debug'
             'tests/test_cli.c',
             'src/cli.c',
             'src/options.c',
+            'src/util/net.c',
             'src/util/str.c',
             'src/util/strbuf.c',
             'src/util/term.c',
@@ -228,6 +285,9 @@ if get_option('buildtype') == 'debug'
             'tests/test_str.c',
             'src/util/str.c',
             'src/util/strbuf.c',
+        ]],
+        ['test_vector', [
+            'tests/test_vector.c',
         ]],
     ]
 

@@ -9,6 +9,7 @@
 
 #include "options.h"
 #include "util/log.h"
+#include "util/net.h"
 #include "util/str.h"
 #include "util/strbuf.h"
 #include "util/term.h"
@@ -46,6 +47,15 @@
 #define OPT_V4L2_SINK              1027
 #define OPT_DISPLAY_BUFFER         1028
 #define OPT_V4L2_BUFFER            1029
+#define OPT_TUNNEL_HOST            1030
+#define OPT_TUNNEL_PORT            1031
+#define OPT_NO_CLIPBOARD_AUTOSYNC  1032
+#define OPT_TCPIP                  1033
+#define OPT_RAW_KEY_EVENTS         1034
+#define OPT_NO_DOWNSIZE_ON_ERROR   1035
+#define OPT_OTG                    1036
+#define OPT_NO_CLEANUP             1037
+#define OPT_PRINT_FPS              1038
 
 struct sc_option {
     char shortopt;
@@ -62,6 +72,11 @@ struct sc_option {
 #define MAX_EQUIVALENT_SHORTCUTS 3
 struct sc_shortcut {
     const char *shortcuts[MAX_EQUIVALENT_SHORTCUTS + 1];
+    const char *text;
+};
+
+struct sc_envvar {
+    const char *name;
     const char *text;
 };
 
@@ -103,7 +118,13 @@ static const struct sc_option options[] = {
         .text = "Crop the device screen on the server.\n"
                 "The values are expressed in the device natural orientation "
                 "(typically, portrait for a phone, landscape for a tablet). "
-                "Any --max-size value is cmoputed on the cropped size.",
+                "Any --max-size value is computed on the cropped size.",
+    },
+    {
+        .shortopt = 'd',
+        .longopt = "select-usb",
+        .text = "Use USB device (if there is exactly one, like adb -d).\n"
+                "Also see -e (--select-tcpip).",
     },
     {
         .longopt_id = OPT_DISABLE_SCREENSAVER,
@@ -127,6 +148,12 @@ static const struct sc_option options[] = {
         .text = "Add a buffering delay (in milliseconds) before displaying. "
                 "This increases latency to compensate for jitter.\n"
                 "Default is 0 (no buffering).",
+    },
+    {
+        .shortopt = 'e',
+        .longopt = "select-tcpip",
+        .text = "Use TCP/IP device (if there is exactly one, like adb -e).\n"
+                "Also see -d (--select-usb).",
     },
     {
         .longopt_id = OPT_ENCODER_NAME,
@@ -159,8 +186,15 @@ static const struct sc_option options[] = {
                 "It provides a better experience for IME users, and allows to "
                 "generate non-ASCII characters, contrary to the default "
                 "injection method.\n"
-                "It may only work over USB, and is currently only supported "
-                "on Linux.",
+                "It may only work over USB.\n"
+                "The keyboard layout must be configured (once and for all) on "
+                "the device, via Settings -> System -> Languages and input -> "
+                "Physical keyboard. This settings page can be started "
+                "directly: `adb shell am start -a "
+                "android.settings.HARD_KEYBOARD_SETTINGS`.\n"
+                "However, the option is only available when the HID keyboard "
+                "is enabled (or a physical keyboard is connected).\n"
+                "Also see --hid-mouse.",
     },
     {
         .shortopt = 'h',
@@ -197,6 +231,17 @@ static const struct sc_option options[] = {
                 "since Android 10, but may work on earlier versions).",
     },
     {
+        .shortopt = 'M',
+        .longopt = "hid-mouse",
+        .text = "Simulate a physical mouse by using HID over AOAv2.\n"
+                "In this mode, the computer mouse is captured to control the "
+                "device directly (relative mouse mode).\n"
+                "LAlt, LSuper or RSuper toggle the capture mode, to give "
+                "control of the mouse back to the computer.\n"
+                "It may only work over USB.\n"
+                "Also see --hid-keyboard.",
+    },
+    {
         .shortopt = 'm',
         .longopt = "max-size",
         .argdesc = "value",
@@ -206,6 +251,30 @@ static const struct sc_option options[] = {
                 "Default is 0 (unlimited).",
     },
     {
+        .longopt_id = OPT_NO_CLEANUP,
+        .longopt = "no-cleanup",
+        .text = "By default, scrcpy removes the server binary from the device "
+                "and restores the device state (show touches, stay awake and "
+                "power mode) on exit.\n"
+                "This option disables this cleanup."
+    },
+    {
+        .longopt_id = OPT_NO_CLIPBOARD_AUTOSYNC,
+        .longopt = "no-clipboard-autosync",
+        .text = "By default, scrcpy automatically synchronizes the computer "
+                "clipboard to the device clipboard before injecting Ctrl+v, "
+                "and the device clipboard to the computer clipboard whenever "
+                "it changes.\n"
+                "This option disables this automatic synchronization."
+    },
+    {
+        .longopt_id = OPT_NO_DOWNSIZE_ON_ERROR,
+        .longopt = "no-downsize-on-error",
+        .text = "By default, on MediaCodec error, scrcpy automatically tries "
+                "again with a lower definition.\n"
+                "This option disables this behavior.",
+    },
+    {
         .shortopt = 'n',
         .longopt = "no-control",
         .text = "Disable device control (mirror the device in read-only).",
@@ -213,11 +282,8 @@ static const struct sc_option options[] = {
     {
         .shortopt = 'N',
         .longopt = "no-display",
-        .text = "Do not display device (only when screen recording "
-#ifdef HAVE_V4L2
-                "or V4L2 sink "
-#endif
-                "is enabled).",
+        .text = "Do not display device (only when screen recording or V4L2 "
+                "sink is enabled).",
     },
     {
         .longopt_id = OPT_NO_KEY_REPEAT,
@@ -230,6 +296,21 @@ static const struct sc_option options[] = {
         .text = "If the renderer is OpenGL 3.0+ or OpenGL ES 2.0+, then "
                 "mipmaps are automatically generated to improve downscaling "
                 "quality. This option disables the generation of mipmaps.",
+    },
+    {
+        .longopt_id = OPT_OTG,
+        .longopt = "otg",
+        .text = "Run in OTG mode: simulate physical keyboard and mouse, "
+                "as if the computer keyboard and mouse were plugged directly "
+                "to the device via an OTG cable.\n"
+                "In this mode, adb (USB debugging) is not necessary, and "
+                "mirroring is disabled.\n"
+                "LAlt, LSuper or RSuper toggle the mouse capture mode, to give "
+                "control of the mouse back to the computer.\n"
+                "If any of --hid-keyboard or --hid-mouse is set, only enable "
+                "keyboard or mouse respectively, otherwise enable both.\n"
+                "It may only work over USB.\n"
+                "See --hid-keyboard and --hid-mouse.",
     },
     {
         .shortopt = 'p',
@@ -247,11 +328,17 @@ static const struct sc_option options[] = {
     {
         .longopt_id = OPT_PREFER_TEXT,
         .longopt = "prefer-text",
-        .text = "Inject alpha characters and space as text events instead of"
+        .text = "Inject alpha characters and space as text events instead of "
                 "key events.\n"
                 "This avoids issues when combining multiple keys to enter a "
                 "special character, but breaks the expected behavior of alpha "
                 "keys in games (typically WASD).",
+    },
+    {
+        .longopt_id = OPT_PRINT_FPS,
+        .longopt = "print-fps",
+        .text = "Start FPS counter, to print framerate logs to the console. "
+                "It can be started or stopped at any time with MOD+i.",
     },
     {
         .longopt_id = OPT_PUSH_TARGET,
@@ -260,6 +347,11 @@ static const struct sc_option options[] = {
         .text = "Set the target directory for pushing files to the device by "
                 "drag & drop. It is passed as is to \"adb push\".\n"
                 "Default is \"/sdcard/Download/\".",
+    },
+    {
+        .longopt_id = OPT_RAW_KEY_EVENTS,
+        .longopt = "raw-key-events",
+        .text = "Inject key events for all input keys, and ignore text events."
     },
     {
         .shortopt = 'r',
@@ -330,14 +422,47 @@ static const struct sc_option options[] = {
                 "on exit.\n"
                 "It only shows physical touches (not clicks from scrcpy).",
     },
-#ifdef HAVE_V4L2
+    {
+        .longopt_id = OPT_TCPIP,
+        .longopt = "tcpip",
+        .argdesc = "ip[:port]",
+        .optional_arg = true,
+        .text = "Configure and reconnect the device over TCP/IP.\n"
+                "If a destination address is provided, then scrcpy connects to "
+                "this address before starting. The device must listen on the "
+                "given TCP port (default is 5555).\n"
+                "If no destination address is provided, then scrcpy attempts "
+                "to find the IP address of the current device (typically "
+                "connected over USB), enables TCP/IP mode, then connects to "
+                "this address before starting.",
+    },
+    {
+        .longopt_id = OPT_TUNNEL_HOST,
+        .longopt = "tunnel-host",
+        .argdesc = "ip",
+        .text = "Set the IP address of the adb tunnel to reach the scrcpy "
+                "server. This option automatically enables "
+                "--force-adb-forward.\n"
+                "Default is localhost.",
+    },
+    {
+        .longopt_id = OPT_TUNNEL_PORT,
+        .longopt = "tunnel-port",
+        .argdesc = "port",
+        .text = "Set the TCP port of the adb tunnel to reach the scrcpy "
+                "server. This option automatically enables "
+                "--force-adb-forward.\n"
+                "Default is 0 (not forced): the local port used for "
+                "establishing the tunnel will be used.",
+    },
     {
         .longopt_id = OPT_V4L2_SINK,
         .longopt = "v4l2-sink",
         .argdesc = "/dev/videoN",
         .text = "Output to v4l2loopback device.\n"
                 "It requires to lock the video orientation (see "
-                "--lock-video-orientation).",
+                "--lock-video-orientation).\n"
+                "This feature is only available on Linux.",
     },
     {
         .longopt_id = OPT_V4L2_BUFFER,
@@ -347,9 +472,9 @@ static const struct sc_option options[] = {
                 "frames. This increases latency to compensate for jitter.\n"
                 "This option is similar to --display-buffer, but specific to "
                 "V4L2 sink.\n"
-                "Default is 0 (no buffering).",
+                "Default is 0 (no buffering).\n"
+                "This option is only available on Linux.",
     },
-#endif
     {
         .shortopt = 'V',
         .longopt = "verbosity",
@@ -525,6 +650,21 @@ static const struct sc_shortcut shortcuts[] = {
     },
 };
 
+static const struct sc_envvar envvars[] = {
+    {
+        .name = "ADB",
+        .text = "Path to adb executable",
+    },
+    {
+        .name = "SCRCPY_ICON_PATH",
+        .text = "Path to the program icon",
+    },
+    {
+        .name = "SCRCPY_SERVER_PATH",
+        .text = "Path to the server binary",
+    }
+};
+
 static char *
 sc_getopt_adapter_create_optstring(void) {
     struct sc_strbuf buf;
@@ -563,12 +703,17 @@ sc_getopt_adapter_create_longopts(void) {
     struct option *longopts =
         malloc((ARRAY_LEN(options) + 1) * sizeof(*longopts));
     if (!longopts) {
+        LOG_OOM();
         return NULL;
     }
 
     size_t out_idx = 0;
     for (size_t i = 0; i < ARRAY_LEN(options); ++i) {
         const struct sc_option *in = &options[i];
+
+        // If longopt_id is set, then longopt must be set
+        assert(!in->longopt_id || in->longopt);
+
         if (!in->longopt) {
             // The longopts array must only contain long options
             continue;
@@ -613,7 +758,7 @@ sc_getopt_adapter_init(struct sc_getopt_adapter *adapter) {
     }
 
     return true;
-};
+}
 
 static void
 sc_getopt_adapter_destroy(struct sc_getopt_adapter *adapter) {
@@ -671,12 +816,12 @@ print_option_usage_header(const struct sc_option *opt) {
         }
     }
 
-    fprintf(stderr, "\n    %s\n", buf.s);
+    printf("\n    %s\n", buf.s);
     free(buf.s);
     return;
 
 error:
-    fprintf(stderr, "<ERROR>\n");
+    printf("<ERROR>\n");
 }
 
 static void
@@ -692,11 +837,11 @@ print_option_usage(const struct sc_option *opt, unsigned cols) {
 
     char *text = sc_str_wrap_lines(opt->text, cols, 8);
     if (!text) {
-        fprintf(stderr, "<ERROR>\n");
+        printf("<ERROR>\n");
         return;
     }
 
-    fprintf(stderr, "%s\n", text);
+    printf("%s\n", text);
     free(text);
 }
 
@@ -707,11 +852,11 @@ print_shortcuts_intro(unsigned cols) {
         "(left) Alt or (left) Super, but it can be configured by "
         "--shortcut-mod (see above).", cols, 4);
     if (!intro) {
-        fprintf(stderr, "<ERROR>\n");
+        printf("<ERROR>\n");
         return;
     }
 
-    fprintf(stderr, "%s\n", intro);
+    printf("\n%s\n", intro);
     free(intro);
 }
 
@@ -721,21 +866,38 @@ print_shortcut(const struct sc_shortcut *shortcut, unsigned cols) {
     assert(shortcut->shortcuts[0]); // At least one shortcut
     assert(shortcut->text);
 
-    fprintf(stderr, "\n");
+    printf("\n");
 
     unsigned i = 0;
     while (shortcut->shortcuts[i]) {
-        fprintf(stderr, "    %s\n", shortcut->shortcuts[i]);
+        printf("    %s\n", shortcut->shortcuts[i]);
         ++i;
     };
 
     char *text = sc_str_wrap_lines(shortcut->text, cols, 8);
     if (!text) {
-        fprintf(stderr, "<ERROR>\n");
+        printf("<ERROR>\n");
         return;
     }
 
-    fprintf(stderr, "%s\n", text);
+    printf("%s\n", text);
+    free(text);
+}
+
+static void
+print_envvar(const struct sc_envvar *envvar, unsigned cols) {
+    assert(cols > 8); // sc_str_wrap_lines() requires indent < columns
+    assert(envvar->name);
+    assert(envvar->text);
+
+    printf("\n    %s\n", envvar->name);
+    char *text = sc_str_wrap_lines(envvar->text, cols, 8);
+    if (!text) {
+        printf("<ERROR>\n");
+        return;
+    }
+
+    printf("%s\n", text);
     free(text);
 }
 
@@ -759,17 +921,23 @@ scrcpy_print_usage(const char *arg0) {
         }
     }
 
-    fprintf(stderr, "Usage: %s [options]\n\n"
-                    "Options:\n", arg0);
+    printf("Usage: %s [options]\n\n"
+            "Options:\n", arg0);
     for (size_t i = 0; i < ARRAY_LEN(options); ++i) {
         print_option_usage(&options[i], cols);
     }
 
     // Print shortcuts section
-    fprintf(stderr, "\nShortcuts:\n\n");
+    printf("\nShortcuts:\n");
     print_shortcuts_intro(cols);
     for (size_t i = 0; i < ARRAY_LEN(shortcuts); ++i) {
         print_shortcut(&shortcuts[i], cols);
+    }
+
+    // Print environment variables section
+    printf("\nEnvironment variables:\n");
+    for (size_t i = 0; i < ARRAY_LEN(envvars); ++i) {
+        print_envvar(&envvars[i], cols);
     }
 }
 
@@ -1013,7 +1181,7 @@ parse_log_level(const char *s, enum sc_log_level *log_level) {
 }
 
 // item is a list of mod keys separated by '+' (e.g. "lctrl+lalt")
-// returns a bitwise-or of SC_MOD_* constants (or 0 on error)
+// returns a bitwise-or of SC_SHORTCUT_MOD_* constants (or 0 on error)
 static unsigned
 parse_shortcut_mods_item(const char *item, size_t len) {
     unsigned mod = 0;
@@ -1031,17 +1199,17 @@ parse_shortcut_mods_item(const char *item, size_t len) {
     ((sizeof(literal)-1 == len) && !memcmp(literal, s, len))
 
         if (STREQ("lctrl", item, key_len)) {
-            mod |= SC_MOD_LCTRL;
+            mod |= SC_SHORTCUT_MOD_LCTRL;
         } else if (STREQ("rctrl", item, key_len)) {
-            mod |= SC_MOD_RCTRL;
+            mod |= SC_SHORTCUT_MOD_RCTRL;
         } else if (STREQ("lalt", item, key_len)) {
-            mod |= SC_MOD_LALT;
+            mod |= SC_SHORTCUT_MOD_LALT;
         } else if (STREQ("ralt", item, key_len)) {
-            mod |= SC_MOD_RALT;
+            mod |= SC_SHORTCUT_MOD_RALT;
         } else if (STREQ("lsuper", item, key_len)) {
-            mod |= SC_MOD_LSUPER;
+            mod |= SC_SHORTCUT_MOD_LSUPER;
         } else if (STREQ("rsuper", item, key_len)) {
-            mod |= SC_MOD_RSUPER;
+            mod |= SC_SHORTCUT_MOD_RSUPER;
         } else {
             LOGE("Unknown modifier key: %.*s "
                  "(must be one of: lctrl, rctrl, lalt, ralt, lsuper, rsuper)",
@@ -1123,6 +1291,21 @@ parse_record_format(const char *optarg, enum sc_record_format *format) {
     return false;
 }
 
+static bool
+parse_ip(const char *optarg, uint32_t *ipv4) {
+    return net_parse_ipv4(optarg, ipv4);
+}
+
+static bool
+parse_port(const char *optarg, uint16_t *port) {
+    long value;
+    if (!parse_integer_arg(optarg, &value, false, 0, 0xFFFF, "port")) {
+        return false;
+    }
+    *port = (uint16_t) value;
+    return true;
+}
+
 static enum sc_record_format
 guess_record_format(const char *filename) {
     size_t len = strlen(filename);
@@ -1162,6 +1345,12 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                     return false;
                 }
                 break;
+            case 'd':
+                opts->select_usb = true;
+                break;
+            case 'e':
+                opts->select_tcpip = true;
+                break;
             case 'f':
                 opts->fullscreen = true;
                 break;
@@ -1177,8 +1366,13 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                 args->help = true;
                 break;
             case 'K':
+#ifdef HAVE_USB
                 opts->keyboard_input_mode = SC_KEYBOARD_INPUT_MODE_HID;
                 break;
+#else
+                LOGE("HID over AOA (-K/--hid-keyboard) is disabled.");
+                return false;
+#endif
             case OPT_MAX_FPS:
                 if (!parse_max_fps(optarg, &opts->max_fps)) {
                     return false;
@@ -1189,9 +1383,27 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                     return false;
                 }
                 break;
+            case 'M':
+#ifdef HAVE_USB
+                opts->mouse_input_mode = SC_MOUSE_INPUT_MODE_HID;
+                break;
+#else
+                LOGE("HID over AOA (-M/--hid-mouse) is disabled.");
+                return false;
+#endif
             case OPT_LOCK_VIDEO_ORIENTATION:
                 if (!parse_lock_video_orientation(optarg,
                         &opts->lock_video_orientation)) {
+                    return false;
+                }
+                break;
+            case OPT_TUNNEL_HOST:
+                if (!parse_ip(optarg, &opts->tunnel_host)) {
+                    return false;
+                }
+                break;
+            case OPT_TUNNEL_PORT:
+                if (!parse_port(optarg, &opts->tunnel_port)) {
                     return false;
                 }
                 break;
@@ -1266,7 +1478,18 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                 opts->push_target = optarg;
                 break;
             case OPT_PREFER_TEXT:
-                opts->prefer_text = true;
+                if (opts->key_inject_mode != SC_KEY_INJECT_MODE_MIXED) {
+                    LOGE("--prefer-text is incompatible with --raw-key-events");
+                    return false;
+                }
+                opts->key_inject_mode = SC_KEY_INJECT_MODE_TEXT;
+                break;
+            case OPT_RAW_KEY_EVENTS:
+                if (opts->key_inject_mode != SC_KEY_INJECT_MODE_MIXED) {
+                    LOGE("--prefer-text is incompatible with --raw-key-events");
+                    return false;
+                }
+                opts->key_inject_mode = SC_KEY_INJECT_MODE_RAW;
                 break;
             case OPT_ROTATION:
                 if (!parse_rotation(optarg, &opts->rotation)) {
@@ -1313,20 +1536,75 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                     return false;
                 }
                 break;
-#ifdef HAVE_V4L2
+            case OPT_NO_CLIPBOARD_AUTOSYNC:
+                opts->clipboard_autosync = false;
+                break;
+            case OPT_TCPIP:
+                opts->tcpip = true;
+                opts->tcpip_dst = optarg;
+                break;
+            case OPT_NO_DOWNSIZE_ON_ERROR:
+                opts->downsize_on_error = false;
+                break;
+            case OPT_NO_CLEANUP:
+                opts->cleanup = false;
+                break;
+            case OPT_PRINT_FPS:
+                opts->start_fps_counter = true;
+                break;
+            case OPT_OTG:
+#ifdef HAVE_USB
+                opts->otg = true;
+                break;
+#else
+                LOGE("OTG mode (--otg) is disabled.");
+                return false;
+#endif
             case OPT_V4L2_SINK:
+#ifdef HAVE_V4L2
                 opts->v4l2_device = optarg;
                 break;
+#else
+                LOGE("V4L2 (--v4l2-sink) is disabled (or unsupported on this "
+                     "platform).");
+                return false;
+#endif
             case OPT_V4L2_BUFFER:
+#ifdef HAVE_V4L2
                 if (!parse_buffering_time(optarg, &opts->v4l2_buffer)) {
                     return false;
                 }
                 break;
+#else
+                LOGE("V4L2 (--v4l2-buffer) is only available on Linux.");
+                return false;
 #endif
             default:
                 // getopt prints the error message on stderr
                 return false;
         }
+    }
+
+    int index = optind;
+    if (index < argc) {
+        LOGE("Unexpected additional argument: %s", argv[index]);
+        return false;
+    }
+
+    // If a TCP/IP address is provided, then tcpip must be enabled
+    assert(opts->tcpip || !opts->tcpip_dst);
+
+    unsigned selectors = !!opts->serial
+                       + !!opts->tcpip_dst
+                       + opts->select_tcpip
+                       + opts->select_usb;
+    if (selectors > 1) {
+        LOGE("At most one device selector option may be passed, among:\n"
+             "  --serial (-s)\n"
+             "  --select-usb (-d)\n"
+             "  --select-tcpip (-e)\n"
+             "  --tcpip=<addr> (with an argument)");
+        return false;
     }
 
 #ifdef HAVE_V4L2
@@ -1336,11 +1614,18 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
         return false;
     }
 
-    if (opts->v4l2_device && opts->lock_video_orientation
-                             == SC_LOCK_VIDEO_ORIENTATION_UNLOCKED) {
-        LOGI("Video orientation is locked for v4l2 sink. "
-             "See --lock-video-orientation.");
-        opts->lock_video_orientation = SC_LOCK_VIDEO_ORIENTATION_INITIAL;
+    if (opts->v4l2_device) {
+        if (opts->lock_video_orientation ==
+                SC_LOCK_VIDEO_ORIENTATION_UNLOCKED) {
+            LOGI("Video orientation is locked for v4l2 sink. "
+                 "See --lock-video-orientation.");
+            opts->lock_video_orientation = SC_LOCK_VIDEO_ORIENTATION_INITIAL;
+        }
+
+        // V4L2 could not handle size change.
+        // Do not log because downsizing on error is the default behavior,
+        // not an explicit request from the user.
+        opts->downsize_on_error = false;
     }
 
     if (opts->v4l2_buffer && !opts->v4l2_device) {
@@ -1354,10 +1639,10 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
     }
 #endif
 
-    int index = optind;
-    if (index < argc) {
-        LOGE("Unexpected additional argument: %s", argv[index]);
-        return false;
+    if ((opts->tunnel_host || opts->tunnel_port) && !opts->force_adb_forward) {
+        LOGI("Tunnel host/port is set, "
+             "--force-adb-forward automatically enabled.");
+        opts->force_adb_forward = true;
     }
 
     if (opts->record_format && !opts->record_filename) {
@@ -1375,15 +1660,73 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
         }
     }
 
-    if (!opts->control && opts->turn_screen_off) {
-        LOGE("Could not request to turn screen off if control is disabled");
-        return false;
+    if (!opts->control) {
+        if (opts->turn_screen_off) {
+            LOGE("Could not request to turn screen off if control is disabled");
+            return false;
+        }
+        if (opts->stay_awake) {
+            LOGE("Could not request to stay awake if control is disabled");
+            return false;
+        }
+        if (opts->show_touches) {
+            LOGE("Could not request to show touches if control is disabled");
+            return false;
+        }
+        if (opts->power_off_on_close) {
+            LOGE("Could not request power off on close if control is disabled");
+            return false;
+        }
     }
 
-    if (!opts->control && opts->stay_awake) {
-        LOGE("Could not request to stay awake if control is disabled");
+#ifdef HAVE_USB
+
+# ifdef _WIN32
+    if (!opts->otg && (opts->keyboard_input_mode == SC_KEYBOARD_INPUT_MODE_HID
+                    || opts->mouse_input_mode == SC_MOUSE_INPUT_MODE_HID)) {
+        LOGE("On Windows, it is not possible to open a USB device already open "
+             "by another process (like adb).");
+        LOGE("Therefore, -K/--hid-keyboard and -M/--hid-mouse may only work in "
+             "OTG mode (--otg).");
         return false;
     }
+# endif
+
+    if (opts->otg) {
+        // OTG mode is compatible with only very few options.
+        // Only report obvious errors.
+        if (opts->record_filename) {
+            LOGE("OTG mode: could not record");
+            return false;
+        }
+        if (opts->turn_screen_off) {
+            LOGE("OTG mode: could not turn screen off");
+            return false;
+        }
+        if (opts->stay_awake) {
+            LOGE("OTG mode: could not stay awake");
+            return false;
+        }
+        if (opts->show_touches) {
+            LOGE("OTG mode: could not request to show touches");
+            return false;
+        }
+        if (opts->power_off_on_close) {
+            LOGE("OTG mode: could not request power off on close");
+            return false;
+        }
+        if (opts->display_id) {
+            LOGE("OTG mode: could not select display");
+            return false;
+        }
+# ifdef HAVE_V4L2
+        if (opts->v4l2_device) {
+            LOGE("OTG mode: could not sink to V4L2 device");
+            return false;
+        }
+# endif
+    }
+#endif
 
     return true;
 }

@@ -7,8 +7,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "adb.h"
-#include "adb_tunnel.h"
+#include "adb/adb_tunnel.h"
 #include "coords.h"
 #include "options.h"
 #include "util/intr.h"
@@ -23,12 +22,14 @@ struct sc_server_info {
 };
 
 struct sc_server_params {
-    const char *serial;
+    const char *req_serial;
     enum sc_log_level log_level;
     const char *crop;
     const char *codec_options;
     const char *encoder_name;
     struct sc_port_range port_range;
+    uint32_t tunnel_host;
+    uint16_t tunnel_port;
     uint16_t max_size;
     uint32_t bit_rate;
     uint16_t max_fps;
@@ -39,11 +40,19 @@ struct sc_server_params {
     bool stay_awake;
     bool force_adb_forward;
     bool power_off_on_close;
+    bool clipboard_autosync;
+    bool downsize_on_error;
+    bool tcpip;
+    const char *tcpip_dst;
+    bool select_usb;
+    bool select_tcpip;
+    bool cleanup;
 };
 
 struct sc_server {
     // The internal allocated strings are copies owned by the server
     struct sc_server_params params;
+    char *serial;
 
     sc_thread thread;
     struct sc_server_info info; // initialized once connected

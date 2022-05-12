@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #include "aoa_hid.h"
+#include "util/log.h"
 
 // See <https://source.android.com/devices/accessories/aoa2#hid-support>.
 #define ACCESSORY_REGISTER_HID 54
@@ -20,6 +21,7 @@ sc_hid_event_log(const struct sc_hid_event *event) {
     unsigned buffer_size = event->size * 3 + 1;
     char *buffer = malloc(buffer_size);
     if (!buffer) {
+        LOG_OOM();
         return;
     }
     for (unsigned i = 0; i < event->size; ++i) {
@@ -35,7 +37,7 @@ sc_hid_event_init(struct sc_hid_event *hid_event, uint16_t accessory_id,
     hid_event->accessory_id = accessory_id;
     hid_event->buffer = buffer;
     hid_event->size = buffer_size;
-    hid_event->delay = 0;
+    hid_event->ack_to_wait = SC_SEQUENCE_INVALID;
 }
 
 void
@@ -43,82 +45,9 @@ sc_hid_event_destroy(struct sc_hid_event *hid_event) {
     free(hid_event->buffer);
 }
 
-static inline void
-log_libusb_error(enum libusb_error errcode) {
-    LOGW("libusb error: %s", libusb_strerror(errcode));
-}
-
-static bool
-accept_device(libusb_device *device, const char *serial) {
-    // do not log any USB error in this function, it is expected that many USB
-    // devices available on the computer have permission restrictions
-
-    struct libusb_device_descriptor desc;
-    libusb_get_device_descriptor(device, &desc);
-
-    if (!desc.iSerialNumber) {
-        return false;
-    }
-
-    libusb_device_handle *handle;
-    int result = libusb_open(device, &handle);
-    if (result < 0) {
-        return false;
-    }
-
-    char buffer[128];
-    result = libusb_get_string_descriptor_ascii(handle, desc.iSerialNumber,
-                                                (unsigned char *) buffer,
-                                                sizeof(buffer));
-    libusb_close(handle);
-    if (result < 0) {
-        return false;
-    }
-
-    buffer[sizeof(buffer) - 1] = '\0'; // just in case
-
-    // accept the device if its serial matches
-    return !strcmp(buffer, serial);
-}
-
-static libusb_device *
-sc_aoa_find_usb_device(const char *serial) {
-    if (!serial) {
-        return NULL;
-    }
-
-    libusb_device **list;
-    libusb_device *result = NULL;
-    ssize_t count = libusb_get_device_list(NULL, &list);
-    if (count < 0) {
-        log_libusb_error((enum libusb_error) count);
-        return NULL;
-    }
-
-    for (size_t i = 0; i < (size_t) count; ++i) {
-        libusb_device *device = list[i];
-
-        if (accept_device(device, serial)) {
-            result = libusb_ref_device(device);
-            break;
-        }
-    }
-    libusb_free_device_list(list, 1);
-    return result;
-}
-
-static int
-sc_aoa_open_usb_handle(libusb_device *device, libusb_device_handle **handle) {
-    int result = libusb_open(device, handle);
-    if (result < 0) {
-        log_libusb_error((enum libusb_error) result);
-        return result;
-    }
-    return 0;
-}
-
 bool
-sc_aoa_init(struct sc_aoa *aoa, const char *serial) {
+sc_aoa_init(struct sc_aoa *aoa, struct sc_usb *usb,
+            struct sc_acksync *acksync) {
     cbuf_init(&aoa->queue);
 
     if (!sc_mutex_init(&aoa->mutex)) {
@@ -130,31 +59,9 @@ sc_aoa_init(struct sc_aoa *aoa, const char *serial) {
         return false;
     }
 
-    if (libusb_init(&aoa->usb_context) != LIBUSB_SUCCESS) {
-        sc_cond_destroy(&aoa->event_cond);
-        sc_mutex_destroy(&aoa->mutex);
-        return false;
-    }
-
-    aoa->usb_device = sc_aoa_find_usb_device(serial);
-    if (!aoa->usb_device) {
-        LOGW("USB device of serial %s not found", serial);
-        libusb_exit(aoa->usb_context);
-        sc_mutex_destroy(&aoa->mutex);
-        sc_cond_destroy(&aoa->event_cond);
-        return false;
-    }
-
-    if (sc_aoa_open_usb_handle(aoa->usb_device, &aoa->usb_handle) < 0) {
-        LOGW("Open USB handle failed");
-        libusb_unref_device(aoa->usb_device);
-        libusb_exit(aoa->usb_context);
-        sc_cond_destroy(&aoa->event_cond);
-        sc_mutex_destroy(&aoa->mutex);
-        return false;
-    }
-
     aoa->stopped = false;
+    aoa->acksync = acksync;
+    aoa->usb = usb;
 
     return true;
 }
@@ -167,9 +74,6 @@ sc_aoa_destroy(struct sc_aoa *aoa) {
         sc_hid_event_destroy(&event);
     }
 
-    libusb_close(aoa->usb_handle);
-    libusb_unref_device(aoa->usb_device);
-    libusb_exit(aoa->usb_context);
     sc_cond_destroy(&aoa->event_cond);
     sc_mutex_destroy(&aoa->mutex);
 }
@@ -186,11 +90,12 @@ sc_aoa_register_hid(struct sc_aoa *aoa, uint16_t accessory_id,
     uint16_t index = report_desc_size;
     unsigned char *buffer = NULL;
     uint16_t length = 0;
-    int result = libusb_control_transfer(aoa->usb_handle, request_type, request,
-                                         value, index, buffer, length,
+    int result = libusb_control_transfer(aoa->usb->handle, request_type,
+                                         request, value, index, buffer, length,
                                          DEFAULT_TIMEOUT);
     if (result < 0) {
-        log_libusb_error((enum libusb_error) result);
+        LOGE("REGISTER_HID: libusb error: %s", libusb_strerror(result));
+        sc_usb_check_disconnected(aoa->usb, result);
         return false;
     }
 
@@ -222,11 +127,12 @@ sc_aoa_set_hid_report_desc(struct sc_aoa *aoa, uint16_t accessory_id,
     // libusb_control_transfer expects a pointer to non-const
     unsigned char *buffer = (unsigned char *) report_desc;
     uint16_t length = report_desc_size;
-    int result = libusb_control_transfer(aoa->usb_handle, request_type, request,
-                                         value, index, buffer, length,
+    int result = libusb_control_transfer(aoa->usb->handle, request_type,
+                                         request, value, index, buffer, length,
                                          DEFAULT_TIMEOUT);
     if (result < 0) {
-        log_libusb_error((enum libusb_error) result);
+        LOGE("SET_HID_REPORT_DESC: libusb error: %s", libusb_strerror(result));
+        sc_usb_check_disconnected(aoa->usb, result);
         return false;
     }
 
@@ -264,11 +170,12 @@ sc_aoa_send_hid_event(struct sc_aoa *aoa, const struct sc_hid_event *event) {
     uint16_t index = 0;
     unsigned char *buffer = event->buffer;
     uint16_t length = event->size;
-    int result = libusb_control_transfer(aoa->usb_handle, request_type, request,
-                                         value, index, buffer, length,
+    int result = libusb_control_transfer(aoa->usb->handle, request_type,
+                                         request, value, index, buffer, length,
                                          DEFAULT_TIMEOUT);
     if (result < 0) {
-        log_libusb_error((enum libusb_error) result);
+        LOGE("SEND_HID_EVENT: libusb error: %s", libusb_strerror(result));
+        sc_usb_check_disconnected(aoa->usb, result);
         return false;
     }
 
@@ -286,11 +193,12 @@ sc_aoa_unregister_hid(struct sc_aoa *aoa, const uint16_t accessory_id) {
     uint16_t index = 0;
     unsigned char *buffer = NULL;
     uint16_t length = 0;
-    int result = libusb_control_transfer(aoa->usb_handle, request_type, request,
-                                         value, index, buffer, length,
+    int result = libusb_control_transfer(aoa->usb->handle, request_type,
+                                         request, value, index, buffer, length,
                                          DEFAULT_TIMEOUT);
     if (result < 0) {
-        log_libusb_error((enum libusb_error) result);
+        LOGE("UNREGISTER_HID: libusb error: %s", libusb_strerror(result));
+        sc_usb_check_disconnected(aoa->usb, result);
         return false;
     }
 
@@ -332,22 +240,32 @@ run_aoa_thread(void *data) {
         assert(non_empty);
         (void) non_empty;
 
-        assert(event.delay >= 0);
-        if (event.delay) {
-            // Wait during the specified delay before injecting the HID event
-            sc_tick deadline = sc_tick_now() + event.delay;
-            bool timed_out = false;
-            while (!aoa->stopped && !timed_out) {
-                timed_out = !sc_cond_timedwait(&aoa->event_cond, &aoa->mutex,
-                                               deadline);
-            }
-            if (aoa->stopped) {
-                sc_mutex_unlock(&aoa->mutex);
+        uint64_t ack_to_wait = event.ack_to_wait;
+        sc_mutex_unlock(&aoa->mutex);
+
+        if (ack_to_wait != SC_SEQUENCE_INVALID) {
+            LOGD("Waiting ack from server sequence=%" PRIu64_, ack_to_wait);
+
+            // If some events have ack_to_wait set, then sc_aoa must have been
+            // initialized with a non NULL acksync
+            assert(aoa->acksync);
+
+            // Do not block the loop indefinitely if the ack never comes (it
+            // should never happen)
+            sc_tick deadline = sc_tick_now() + SC_TICK_FROM_MS(500);
+            enum sc_acksync_wait_result result =
+                sc_acksync_wait(aoa->acksync, ack_to_wait, deadline);
+
+            if (result == SC_ACKSYNC_WAIT_TIMEOUT) {
+                LOGW("Ack not received after 500ms, discarding HID event");
+                sc_hid_event_destroy(&event);
+                continue;
+            } else if (result == SC_ACKSYNC_WAIT_INTR) {
+                // stopped
+                sc_hid_event_destroy(&event);
                 break;
             }
         }
-
-        sc_mutex_unlock(&aoa->mutex);
 
         bool ok = sc_aoa_send_hid_event(aoa, &event);
         sc_hid_event_destroy(&event);
@@ -362,9 +280,9 @@ bool
 sc_aoa_start(struct sc_aoa *aoa) {
     LOGD("Starting AOA thread");
 
-    bool ok = sc_thread_create(&aoa->thread, run_aoa_thread, "aoa_thread", aoa);
+    bool ok = sc_thread_create(&aoa->thread, run_aoa_thread, "scrcpy-aoa", aoa);
     if (!ok) {
-        LOGC("Could not start AOA thread");
+        LOGE("Could not start AOA thread");
         return false;
     }
 
@@ -377,6 +295,10 @@ sc_aoa_stop(struct sc_aoa *aoa) {
     aoa->stopped = true;
     sc_cond_signal(&aoa->event_cond);
     sc_mutex_unlock(&aoa->mutex);
+
+    if (aoa->acksync) {
+        sc_acksync_interrupt(aoa->acksync);
+    }
 }
 
 void

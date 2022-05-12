@@ -1,7 +1,6 @@
 package com.genymobile.scrcpy;
 
 import com.genymobile.scrcpy.wrappers.ClipboardManager;
-import com.genymobile.scrcpy.wrappers.ContentProvider;
 import com.genymobile.scrcpy.wrappers.InputManager;
 import com.genymobile.scrcpy.wrappers.ServiceManager;
 import com.genymobile.scrcpy.wrappers.SurfaceControl;
@@ -28,10 +27,15 @@ public final class Device {
     public static final int POWER_MODE_OFF = SurfaceControl.POWER_MODE_OFF;
     public static final int POWER_MODE_NORMAL = SurfaceControl.POWER_MODE_NORMAL;
 
+    public static final int INJECT_MODE_ASYNC = InputManager.INJECT_INPUT_EVENT_MODE_ASYNC;
+    public static final int INJECT_MODE_WAIT_FOR_RESULT = InputManager.INJECT_INPUT_EVENT_MODE_WAIT_FOR_RESULT;
+    public static final int INJECT_MODE_WAIT_FOR_FINISH = InputManager.INJECT_INPUT_EVENT_MODE_WAIT_FOR_FINISH;
+
     public static final int LOCK_VIDEO_ORIENTATION_UNLOCKED = -1;
     public static final int LOCK_VIDEO_ORIENTATION_INITIAL = -2;
 
     private static final ServiceManager SERVICE_MANAGER = new ServiceManager();
+    private static final Settings SETTINGS = new Settings(SERVICE_MANAGER);
 
     public interface RotationListener {
         void onRotationChanged(int rotation);
@@ -40,6 +44,11 @@ public final class Device {
     public interface ClipboardListener {
         void onClipboardTextChanged(String text);
     }
+
+    private final Size deviceSize;
+    private final Rect crop;
+    private int maxSize;
+    private final int lockVideoOrientation;
 
     private ScreenInfo screenInfo;
     private RotationListener rotationListener;
@@ -68,7 +77,12 @@ public final class Device {
 
         int displayInfoFlags = displayInfo.getFlags();
 
-        screenInfo = ScreenInfo.computeScreenInfo(displayInfo, options.getCrop(), options.getMaxSize(), options.getLockedVideoOrientation());
+        deviceSize = displayInfo.getSize();
+        crop = options.getCrop();
+        maxSize = options.getMaxSize();
+        lockVideoOrientation = options.getLockVideoOrientation();
+
+        screenInfo = ScreenInfo.computeScreenInfo(displayInfo.getRotation(), deviceSize, crop, maxSize, lockVideoOrientation);
         layerStack = displayInfo.getLayerStack();
 
         SERVICE_MANAGER.getWindowManager().registerRotationWatcher(new IRotationWatcher.Stub() {
@@ -85,8 +99,8 @@ public final class Device {
             }
         }, displayId);
 
-        if (options.getControl()) {
-            // If control is enabled, synchronize Android clipboard to the computer automatically
+        if (options.getControl() && options.getClipboardAutosync()) {
+            // If control and autosync are enabled, synchronize Android clipboard to the computer automatically
             ClipboardManager clipboardManager = SERVICE_MANAGER.getClipboardManager();
             if (clipboardManager != null) {
                 clipboardManager.addPrimaryClipChangedListener(new IOnPrimaryClipChangedListener.Stub() {
@@ -120,6 +134,11 @@ public final class Device {
         if (!supportsInputEvents) {
             Ln.w("Input events are not supported for secondary displays before Android 10");
         }
+    }
+
+    public synchronized void setMaxSize(int newMaxSize) {
+        maxSize = newMaxSize;
+        screenInfo = ScreenInfo.computeScreenInfo(screenInfo.getReverseVideoRotation(), deviceSize, crop, newMaxSize, lockVideoOrientation);
     }
 
     public synchronized ScreenInfo getScreenInfo() {
@@ -167,7 +186,7 @@ public final class Device {
         return supportsInputEvents;
     }
 
-    public static boolean injectEvent(InputEvent inputEvent, int displayId) {
+    public static boolean injectEvent(InputEvent inputEvent, int displayId, int injectMode) {
         if (!supportsInputEvents(displayId)) {
             throw new AssertionError("Could not inject input event if !supportsInputEvents()");
         }
@@ -176,22 +195,22 @@ public final class Device {
             return false;
         }
 
-        return SERVICE_MANAGER.getInputManager().injectInputEvent(inputEvent, InputManager.INJECT_INPUT_EVENT_MODE_ASYNC);
+        return SERVICE_MANAGER.getInputManager().injectInputEvent(inputEvent, injectMode);
     }
 
-    public boolean injectEvent(InputEvent event) {
-        return injectEvent(event, displayId);
+    public boolean injectEvent(InputEvent event, int injectMode) {
+        return injectEvent(event, displayId, injectMode);
     }
 
-    public static boolean injectKeyEvent(int action, int keyCode, int repeat, int metaState, int displayId) {
+    public static boolean injectKeyEvent(int action, int keyCode, int repeat, int metaState, int displayId, int injectMode) {
         long now = SystemClock.uptimeMillis();
         KeyEvent event = new KeyEvent(now, now, action, keyCode, repeat, metaState, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0,
                 InputDevice.SOURCE_KEYBOARD);
-        return injectEvent(event, displayId);
+        return injectEvent(event, displayId, injectMode);
     }
 
-    public boolean injectKeyEvent(int action, int keyCode, int repeat, int metaState) {
-        return injectKeyEvent(action, keyCode, repeat, metaState, displayId);
+    public boolean injectKeyEvent(int action, int keyCode, int repeat, int metaState, int injectMode) {
+        return injectKeyEvent(action, keyCode, repeat, metaState, displayId, injectMode);
     }
 
     /**
@@ -228,12 +247,13 @@ public final class Device {
         }
     }
 
-    public static boolean pressReleaseKeycode(int keyCode, int displayId) {
-        return injectKeyEvent(KeyEvent.ACTION_DOWN, keyCode, 0, 0, displayId) && injectKeyEvent(KeyEvent.ACTION_UP, keyCode, 0, 0, displayId);
+    public static boolean pressReleaseKeycode(int keyCode, int displayId, int injectMode) {
+        return injectKeyEvent(KeyEvent.ACTION_DOWN, keyCode, 0, 0, displayId, injectMode)
+                && injectKeyEvent(KeyEvent.ACTION_UP, keyCode, 0, 0, displayId, injectMode);
     }
 
-    public boolean pressReleaseKeycode(int keyCode) {
-        return pressReleaseKeycode(keyCode, displayId);
+    public boolean pressReleaseKeycode(int keyCode, int injectMode) {
+        return pressReleaseKeycode(keyCode, displayId, injectMode);
     }
 
     public static boolean isScreenOn() {
@@ -309,7 +329,7 @@ public final class Device {
         if (!isScreenOn()) {
             return true;
         }
-        return pressReleaseKeycode(KeyEvent.KEYCODE_POWER, displayId);
+        return pressReleaseKeycode(KeyEvent.KEYCODE_POWER, displayId, Device.INJECT_MODE_ASYNC);
     }
 
     /**
@@ -333,7 +353,7 @@ public final class Device {
         }
     }
 
-    public static ContentProvider createSettingsProvider() {
-        return SERVICE_MANAGER.getActivityManager().createSettingsProvider();
+    public static Settings getSettings() {
+        return SETTINGS;
     }
 }

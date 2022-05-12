@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "util/str.h"
@@ -337,6 +338,40 @@ static void test_wrap_lines(void) {
     free(formatted);
 }
 
+static void test_index_of_column(void) {
+    assert(sc_str_index_of_column("a bc  d", 0, " ") == 0);
+    assert(sc_str_index_of_column("a bc  d", 1, " ") == 2);
+    assert(sc_str_index_of_column("a bc  d", 2, " ") == 6);
+    assert(sc_str_index_of_column("a bc  d", 3, " ") == -1);
+
+    assert(sc_str_index_of_column("a  ", 0, " ") == 0);
+    assert(sc_str_index_of_column("a  ", 1, " ") == -1);
+
+    assert(sc_str_index_of_column("", 0, " ") == 0);
+    assert(sc_str_index_of_column("", 1, " ") == -1);
+
+    assert(sc_str_index_of_column("a \t   \t bc  \t  d\t", 0, " \t") == 0);
+    assert(sc_str_index_of_column("a \t   \t bc  \t  d\t", 1, " \t") == 8);
+    assert(sc_str_index_of_column("a \t   \t bc  \t  d\t", 2, " \t") == 15);
+    assert(sc_str_index_of_column("a \t   \t bc  \t  d\t", 3, " \t") == -1);
+
+    assert(sc_str_index_of_column("  a bc  d", 1, " ") == 2);
+}
+
+static void test_remove_trailing_cr() {
+    char s[] = "abc\r";
+    sc_str_remove_trailing_cr(s, sizeof(s) - 1);
+    assert(!strcmp(s, "abc"));
+
+    char s2[] = "def\r\r\r\r";
+    sc_str_remove_trailing_cr(s2, sizeof(s2) - 1);
+    assert(!strcmp(s2, "def"));
+
+    char s3[] = "adb\rdef\r";
+    sc_str_remove_trailing_cr(s3, sizeof(s3) - 1);
+    assert(!strcmp(s3, "adb\rdef"));
+}
+
 int main(int argc, char *argv[]) {
     (void) argc;
     (void) argv;
@@ -356,5 +391,7 @@ int main(int argc, char *argv[]) {
     test_parse_integer_with_suffix();
     test_strlist_contains();
     test_wrap_lines();
+    test_index_of_column();
+    test_remove_trailing_cr();
     return 0;
 }
